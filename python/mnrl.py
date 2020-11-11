@@ -9,6 +9,7 @@ import mnrlerror
 import jsonschema
 import os
 from networkx import drawing
+import re
 
 
 def loadMNRL(filename):
@@ -20,35 +21,54 @@ def loadMNRL(filename):
         try:
             jsonschema.validate(json.loads(json_string),schema)
         except jsonschema.exceptions.ValidationError as e:
-            print "ERROR:", e
+            print("ERROR:", e)
             return None
 
         # parse into MNRL
         d = MNRLDecoder()
         return d.decode(json_string)
 
-def fromDOT(mnrlName, dotfile):
+def fromDOT(mnrlName, automata_file, dotfile):
     """ Generates a MNRL object from a DOT file """
 
     start, accept, nodes, edges = parseDOT(dotfile)
 
-    # print("Start: ", start)
-    # print("Accept: ", accept)
-    # print("Nodes: ", nodes)
-    # print("Edges: ", edges)
+    print("Start: ", start)
+    print("Accept: ", accept)
+    print("Nodes: ", nodes)
+    print("Edges: ", edges)
 
     # Start by making a MNRL network
     mn = MNRLNetwork(mnrlName)
 
     # Our start nodes are epsilon-transition nodes, so let's make their neighbors start nodes
-    real_start_nodes = list()
+    real_start_nodes = set()
 
     # Grab the real start nodes
     for node in start:
         if node in edges.keys():
             for (dst, charset) in edges[node]:
                 assert charset == None, "Something's wrong with a start state!: {}".format(charset)
-                real_start_nodes.append(dst)
+                real_start_nodes.add(dst)
+    
+    print("Real Start States!: ", real_start_nodes)
+
+    if not real_start_nodes:
+        if '0' not in start:
+            start.add('0')
+        elif '1' not in start:
+            start.add('1')
+        else:
+            raise Exception('Missing start node...')
+
+    # Grab the real start nodes
+    for node in start:
+        if node in edges.keys():
+            for (dst, charset) in edges[node]:
+                real_start_nodes.add(dst)
+    
+    assert real_start_nodes, "We don't have any start states! OH NO"
+
 
     # Add the nodes
     for src, neighbors in edges.items():
@@ -77,7 +97,6 @@ def fromDOT(mnrlName, dotfile):
     
     # Special case where the accept state has no edges
     for node in accept:
-        #print("Node ID: ", node)
         if node not in edges.keys():
             state = mn.addState(
                 [],
@@ -93,14 +112,12 @@ def fromDOT(mnrlName, dotfile):
 
         for (dst, charset) in neighbors:
 
-            #print("SRC: ", src, "DST: ", dst)
-
             mn.addConnection((src, charset), (dst, MNRLDefs.STATE_INPUT))
     
     # Now let's make our classical automaton homogeneous!
     homogeneous_mn = make_homogeneous(mn)
 
-    homogeneous_mn.exportToFile(dotfile + '.mnrl')
+    homogeneous_mn.exportToFile(automata_file)
 
 
 def make_homogeneous(mn):
@@ -124,13 +141,13 @@ def make_homogeneous(mn):
         state = mn.getNodeById(s)
 
         #only add nodes if they have incoming transitions
-        for _,(_,src_list) in state.getInputConnections().iteritems():
+        for _,(_,src_list) in state.getInputConnections().items():
             # there is only one input, so this happens once
             for src in src_list:
                 # we need to create a state with the transition from this port
                 # we'll map this to the current state name, but also indicate the input character we match
 
-                # only make a new state if we haven't make one for that input symbol yet
+                # only make a new state if we haven't made one for that input symbol yet
                 if src['portId'] not in mnrl_states[s]:
                     mnrl_states[s][src['portId']] = an.addHState(
                         "\\x{0:02x}".format(ord(src['portId'])) if len(src['portId']) == 1 else src['portId'],
@@ -139,32 +156,51 @@ def make_homogeneous(mn):
                         report = state.report
                     )
                     num_states += 1
+                elif mn.getNodeById(src['id']).enable == MNRLDefs.ENABLE_ON_START_AND_ACTIVATE_IN:
+                    mnrl_states[s][src['portId']].enable = MNRLDefs.ENABLE_ON_START_AND_ACTIVATE_IN
+
     # at this point, the states have been made
     # add the transitions
     for s in mn.nodes:
         mn_state = mn.getNodeById(s)
 
-        for port, an_ste in mnrl_states[s].iteritems():
+        for port, an_ste in mnrl_states[s].items():
             # for each of these nodes
             # add in the transitions coming into the state from the original
-            for _,(_,src_list) in mn_state.getInputConnections().iteritems():
+            for _,(_,src_list) in mn_state.getInputConnections().items():
                 # there is only one input, so this happens once
                 for src in src_list:
                     if src['portId'] == port:
                         # this is the right state for this transition
                         # now, there may be several states actually representing this mnrl state
                         # so we need to make the connection from each
-                        for _,src_ste in mnrl_states[src['id']].iteritems():
+                        for _,src_ste in mnrl_states[src['id']].items():
                             an.addConnection((src_ste.id,MNRLDefs.H_STATE_OUTPUT), (an_ste.id,MNRLDefs.H_STATE_INPUT))
 
     return an
+
+def sanitize_symbol_set(ss):
+    """ This method was ported from VASim's ste.cpp
+        Because VAsim's XML parser sometimes chokes on 
+        special characters
+    """
+    ss = re.sub('(?<!\\\)]]', ']\\]', ss)
+    ss = ss.replace("\\[", "\\x5B")
+    ss = ss.replace("\\]", "\\x5D")
+    ss = ss.replace("&", "\\x26")
+    ss = ss.replace("<", "\\x3C")
+    ss = ss.replace(">", "\\x3E")
+    ss = ss.replace("\"", "\\x22")
+    ss = ss.replace("\'", "\\x27")
+
+    return ss
 
 def parseDOT(filename):
     """ Prase non-homogeneous DOT file and extract data """
 
     graph = drawing.nx_pydot.read_dot(filename)
 
-    start = []
+    start = set()
     accept = []
     nodes = []
     edges = {}
@@ -174,7 +210,12 @@ def parseDOT(filename):
 
         # Found a start node
         if 'START' in node_id:
-            start.append(node_id)
+            start.add(node_id)
+
+        if 'style' in node_info:
+            if 'invis' in node_info['style']:
+                print("*** ADDED START NODE: {}".format(node_id))
+                start.add(node_id)
         
         # Looking for accept states
         if 'shape' in node_info:
@@ -183,6 +224,11 @@ def parseDOT(filename):
             if node_info['shape'] == 'doublecircle':
                 accept.append(node_id)
         
+        elif 'color' in node_info:
+
+            if node_info['color'] == 'darkorchid':
+                accept.append(node_id)
+
         nodes.append(node_id)
 
     for src, neighbors in graph._adj.items():
@@ -197,7 +243,14 @@ def parseDOT(filename):
             if 'label' in values[0]:
 
                 # Append a tuple to the list
-                edges[src].append((dst, values[0]['label'].strip('"')))
+                char_set = values[0]['label'].strip('"')
+                #char_set = char_set.replace(']]', ']\\]')
+
+                char_set = sanitize_symbol_set(char_set)
+
+                    #print("Fixed label: ", char_set)
+
+                edges[src].append((dst, char_set))
             
             # If the edge does not have a label, it's an epsilon transition
             # For non-homogeneous automata, this must mean that the edge
@@ -206,7 +259,9 @@ def parseDOT(filename):
                 edges[src].append((dst, None))
             
             else:
-                raise Exception('We found an edge that is not from a start state, nor does it have a label')
+                # For now, let's just assume its not necessary and ignore it
+                pass
+                #raise Exception('We found an edge that is not from a start state, nor does it have a label')
 
     return start, accept, nodes, edges
 
@@ -313,7 +368,7 @@ class MNRLNetwork(object):
     def toJSON(self):
         return json.dumps({
             'id' : self.id,
-            'nodes' : [json.loads(e.toJSON()) for _,e in self.nodes.iteritems()]
+            'nodes' : [json.loads(e.toJSON()) for _,e in self.nodes.items()]
         })
 
     def exportToFile(self, filename):
@@ -562,7 +617,7 @@ class MNRLNode(object):
 
         # properly define input ports (drop the connections)
         inputDefs = list()
-        for port_id,(width,_) in self.inputDefs.iteritems():
+        for port_id,(width,_) in self.inputDefs.items():
             inputDefs.append({
                 'portId': port_id,
                 'width': width
@@ -570,7 +625,7 @@ class MNRLNode(object):
 
         # properly define output ports
         outputDefs = list()
-        for port_id,(width,connection_list) in self.outputDefs.iteritems():
+        for port_id,(width,connection_list) in self.outputDefs.items():
             outputDefs.append({
                 'portId': port_id,
                 'width': width,
@@ -606,7 +661,7 @@ class MNRLNode(object):
         try:
             for port_id,width in port_def:
                 # check that the port_id is a string
-                if isinstance(port_id, basestring):
+                if isinstance(port_id, str):
                     if port_id in portDefs:
                         raise mnrlerror.DuplicatePortId(port_id)
                     else:
@@ -641,7 +696,7 @@ class State(MNRLNode):
         outputDefs = []
         try:
             for output_id, symbol_set in outputSymbols:
-                if isinstance(output_id, basestring):
+                if isinstance(output_id, str):
                     symbolSet[output_id] = symbol_set
                     outputDefs.append((output_id,1))
                 else:
@@ -777,7 +832,7 @@ class Boolean(MNRLNode):
                  attributes = {}
                 ):
 
-        if isinstance(gateType, basestring):
+        if isinstance(gateType, str):
             if not (isinstance(portCount, int) and portCount > 0):
                 raise mnrlerror.InvalidGatePortCount(portCount)
 
