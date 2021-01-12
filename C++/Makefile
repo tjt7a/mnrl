@@ -1,7 +1,7 @@
 IDIR = ./include
 SRCDIR = ./src
 
-CC = g++
+CC = g++-7
 AR = ar
 LD = ld
 
@@ -12,8 +12,8 @@ NAME = libmnrl
 SNAME = $(NAME).a
 DNAME = $(NAME).so
 
-CXXFLAGS = -Wconversion -Wall -Werror -Wextra -pedantic 
-CXXFLAGS += -I$(IDIR) -I $(RAPIDJSON) --std=c++11 -fPIC
+CXXFLAGS = -Wconversion -Werror -Wextra -pedantic 
+CXXFLAGS += -I$(IDIR) -I $(RAPIDJSON) --std=c++17 -fPIC
 LDFLAGS = -L.
 ARFLAGS = rcs
 
